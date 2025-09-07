@@ -6,6 +6,7 @@ import tensorflow as tf
 
 from gcn.utils import *
 from gcn.models import GCN, MLP
+from gcn.metrics import masked_auc, masked_ap, masked_mrr, masked_hits_at_k
 
 # Set random seed
 seed = 123
@@ -24,9 +25,13 @@ flags.DEFINE_float('dropout', 0.5, 'Dropout rate (1 - keep probability).')
 flags.DEFINE_float('weight_decay', 5e-4, 'Weight for L2 loss on embedding matrix.')
 flags.DEFINE_integer('early_stopping', 10, 'Tolerance for early stopping (# of epochs).')
 flags.DEFINE_integer('max_degree', 3, 'Maximum Chebyshev polynomial degree.')
+flags.DEFINE_boolean('use_features', True, 'Whether to use original node features.')
 
 # Load data
 adj, features, y_train, y_val, y_test, train_mask, val_mask, test_mask = load_data(FLAGS.dataset)
+
+if not FLAGS.use_features:
+    features = sp.csr_matrix(np.ones((adj.shape[0], 1)))
 
 # Some preprocessing
 features = preprocess_features(features)
@@ -63,11 +68,16 @@ sess = tf.Session()
 
 
 # Define model evaluation function
-def evaluate(features, support, labels, mask, placeholders):
+def evaluate(features, support, labels, mask, placeholders, k=100):
     t_test = time.time()
     feed_dict_val = construct_feed_dict(features, support, labels, mask, placeholders)
-    outs_val = sess.run([model.loss, model.accuracy], feed_dict=feed_dict_val)
-    return outs_val[0], outs_val[1], (time.time() - t_test)
+    outs_val = sess.run([model.loss, model.accuracy, model.predict()], feed_dict=feed_dict_val)
+    loss, acc, preds = outs_val
+    auc = masked_auc(preds, labels, mask)
+    ap = masked_ap(preds, labels, mask)
+    mrr = masked_mrr(preds, labels, mask)
+    hits = masked_hits_at_k(preds, labels, mask, k)
+    return loss, acc, auc, ap, mrr, hits, (time.time() - t_test)
 
 
 # Init variables
@@ -87,13 +97,15 @@ for epoch in range(FLAGS.epochs):
     outs = sess.run([model.opt_op, model.loss, model.accuracy], feed_dict=feed_dict)
 
     # Validation
-    cost, acc, duration = evaluate(features, support, y_val, val_mask, placeholders)
+    cost, acc, auc, ap, mrr, hits, duration = evaluate(features, support, y_val, val_mask, placeholders)
     cost_val.append(cost)
 
     # Print results
     print("Epoch:", '%04d' % (epoch + 1), "train_loss=", "{:.5f}".format(outs[1]),
           "train_acc=", "{:.5f}".format(outs[2]), "val_loss=", "{:.5f}".format(cost),
-          "val_acc=", "{:.5f}".format(acc), "time=", "{:.5f}".format(time.time() - t))
+          "val_acc=", "{:.5f}".format(acc), "val_auc=", "{:.5f}".format(auc),
+          "val_ap=", "{:.5f}".format(ap), "val_mrr=", "{:.5f}".format(mrr),
+          "val_hits@100=", "{:.5f}".format(hits), "time=", "{:.5f}".format(time.time() - t))
 
     if epoch > FLAGS.early_stopping and cost_val[-1] > np.mean(cost_val[-(FLAGS.early_stopping+1):-1]):
         print("Early stopping...")
@@ -102,6 +114,9 @@ for epoch in range(FLAGS.epochs):
 print("Optimization Finished!")
 
 # Testing
-test_cost, test_acc, test_duration = evaluate(features, support, y_test, test_mask, placeholders)
+test_cost, test_acc, test_auc, test_ap, test_mrr, test_hits, test_duration = evaluate(
+    features, support, y_test, test_mask, placeholders)
 print("Test set results:", "cost=", "{:.5f}".format(test_cost),
-      "accuracy=", "{:.5f}".format(test_acc), "time=", "{:.5f}".format(test_duration))
+      "accuracy=", "{:.5f}".format(test_acc), "AUC=", "{:.5f}".format(test_auc),
+      "AP=", "{:.5f}".format(test_ap), "MRR=", "{:.5f}".format(test_mrr),
+      "Hits@100=", "{:.5f}".format(test_hits), "time=", "{:.5f}".format(test_duration))

@@ -22,25 +22,32 @@ def sample_mask(idx, l):
 
 
 def load_data(dataset_str):
+    """Load a dataset by name.
+
+    For the classic citation networks (``cora``, ``citeseer``, ``pubmed``),
+    the data is expected to be stored under :mod:`gcn/data` in the same format
+    as used in the original GCN paper.  Additionally, a subset of datasets
+    from the `Open Graph Benchmark <https://ogb.stanford.edu/>`_ can be loaded
+    by specifying their OGB name (e.g. ``ogbl-ppa``).
+
+    Parameters
+    ----------
+    dataset_str : str
+        Dataset identifier.
+
+    Returns
+    -------
+    tuple
+        ``(adj, features, y_train, y_val, y_test, train_mask, val_mask,
+        test_mask)``
     """
-    Loads input data from gcn/data directory
+    if dataset_str.startswith("ogb"):
+        return load_ogb_data(dataset_str)
+    return load_planetoid_data(dataset_str)
 
-    ind.dataset_str.x => the feature vectors of the training instances as scipy.sparse.csr.csr_matrix object;
-    ind.dataset_str.tx => the feature vectors of the test instances as scipy.sparse.csr.csr_matrix object;
-    ind.dataset_str.allx => the feature vectors of both labeled and unlabeled training instances
-        (a superset of ind.dataset_str.x) as scipy.sparse.csr.csr_matrix object;
-    ind.dataset_str.y => the one-hot labels of the labeled training instances as numpy.ndarray object;
-    ind.dataset_str.ty => the one-hot labels of the test instances as numpy.ndarray object;
-    ind.dataset_str.ally => the labels for instances in ind.dataset_str.allx as numpy.ndarray object;
-    ind.dataset_str.graph => a dict in the format {index: [index_of_neighbor_nodes]} as collections.defaultdict
-        object;
-    ind.dataset_str.test.index => the indices of test instances in graph, for the inductive setting as list object.
 
-    All objects above must be saved using python pickle module.
-
-    :param dataset_str: Dataset name
-    :return: All data input files loaded (as well the training/test data).
-    """
+def load_planetoid_data(dataset_str):
+    """Load classic Planetoid datasets from disk."""
     names = ['x', 'y', 'tx', 'ty', 'allx', 'ally', 'graph']
     objects = []
     for i in range(len(names)):
@@ -86,6 +93,58 @@ def load_data(dataset_str):
     y_train[train_mask, :] = labels[train_mask, :]
     y_val[val_mask, :] = labels[val_mask, :]
     y_test[test_mask, :] = labels[test_mask, :]
+
+    return adj, features, y_train, y_val, y_test, train_mask, val_mask, test_mask
+
+
+def load_ogb_data(dataset_str):
+    """Load datasets from the Open Graph Benchmark (OGB).
+
+    This function currently supports node property prediction datasets.  If a
+    link prediction dataset name (prefixed with ``ogbl-``) is provided, it is
+    assumed that a corresponding node property dataset exists with the prefix
+    replaced by ``ogbn-`` (e.g. ``ogbl-ppa`` -> ``ogbn-ppa``).
+    """
+    try:
+        from ogb.nodeproppred import NodePropPredDataset
+    except ImportError as e:
+        raise ImportError("Please install the ogb package to load OGB datasets") from e
+
+    name = dataset_str
+    if dataset_str.startswith("ogbl-"):
+        name = dataset_str.replace("ogbl-", "ogbn-")
+
+    dataset = NodePropPredDataset(name=name, root="data")
+    graph, labels = dataset[0]
+
+    edge_index = graph["edge_index"]
+    num_nodes = graph["num_nodes"]
+    adj = sp.coo_matrix((np.ones(edge_index.shape[1]), (edge_index[0], edge_index[1])),
+                        shape=(num_nodes, num_nodes))
+    # Ensure the adjacency is symmetric
+    adj = adj + adj.T.multiply(adj.T > adj)
+
+    features = sp.csr_matrix(graph["node_feat"])
+
+    labels = labels.reshape(-1)
+    num_classes = labels.max() + 1
+    labels_onehot = np.eye(num_classes)[labels]
+
+    split_idx = dataset.get_idx_split()
+    train_idx = split_idx["train"]
+    val_idx = split_idx["valid"]
+    test_idx = split_idx["test"]
+
+    train_mask = sample_mask(train_idx, num_nodes)
+    val_mask = sample_mask(val_idx, num_nodes)
+    test_mask = sample_mask(test_idx, num_nodes)
+
+    y_train = np.zeros_like(labels_onehot)
+    y_val = np.zeros_like(labels_onehot)
+    y_test = np.zeros_like(labels_onehot)
+    y_train[train_mask, :] = labels_onehot[train_mask, :]
+    y_val[val_mask, :] = labels_onehot[val_mask, :]
+    y_test[test_mask, :] = labels_onehot[test_mask, :]
 
     return adj, features, y_train, y_val, y_test, train_mask, val_mask, test_mask
 
